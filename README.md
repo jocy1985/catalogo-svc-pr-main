@@ -43,7 +43,7 @@ La documentación completa está en la carpeta [`docs/`](docs/):
 - [`docs/05_Justificacion.md`](docs/05_Justificacion.md) — justificación del servicio: RF/RNF/seguridad cubiertos, stack y por qué cada tecnología AWS
 - [`docs/diagramas/`](docs/diagramas/) — C4 (contexto, contenedores, componentes), secuencia e infraestructura AWS — Docker, Docker Compose e integración
 
-## Cómo ejecutar locmente
+## Cómo ejecutar localmente
 
 ```bash
 mvn spring-boot:run
@@ -110,33 +110,3 @@ Ejemplos usados en este repositorio: `feature/version-footer`, `feature/changelo
 `hotfix/typo-readme`.
 
 ### Estructura de carpetas
-
-```
-catalogo-svc/
-├── src/main/java/.../catalogo/        # controller, service, repository, model
-├── src/main/resources/static/         # página de presentación (index.html)
-├── src/test/java/.../catalogo/        # tests unitarios + steps de Cucumber
-├── docs/                              # arquitectura, API, pruebas, despliegue, justificación, diagramas C4
-├── .github/workflows/                 # pipeline de GitHub Actions
-├── Dockerfile / docker-compose.yml
-└── README.md / CHANGELOG.md
-```
-
-### Control de versiones
-
-- Un commit = un cambio lógico; nunca mezclar refactor + feature en el mismo commit.
-- Cambios en código Java siempre acompañados de su prueba (JaCoCo exige 100% LINE).
-- Tags semánticos (`vX.Y.Z`) para marcar parches de hotfix, por ejemplo `v1.0.1`.
-
-### Flujo de merge
-
-- Features y hotfix siempre entran por pull request, nunca push directo a `main` o `develop`.
-- Se necesita al menos 1 aprobación antes de fusionar.
-- Usar merge commit (se conserva la trazabilidad del PR) y borrar la rama después de fusionar.
-- Todo hotfix fusionado en `main` se sincroniza de inmediato a `develop`.
-
-### Estrategia de revisión
-
-- El autor abre el PR con una descripción breve del cambio.
-- El revisor comenta, aprueba o pide cambios; nunca se fusiona un PR sin revisión.
-- Antes de cada PR: confirmar que `mvn test` pasa y revisar la diff completa.
