@@ -1,0 +1,415 @@
+# =============================================================================
+# Pipeline CI/CD — Microservicio Catálogo (caso09 SubBox)        EP2 DOY0101
+#
+#   pruebas ─┬─► sonarcloud ─┐
+#            ├─► snyk ───────┤
+#            └─► imagen ─────┼─► orquestacion-k8s ─► deploy (entorno simulado)
+#               (build+Trivy │
+#                +push GHCR) ┘
+#
+# Regla: el deploy SOLO corre si TODOS los jobs anteriores terminan en verde.
+# Ningún gate de calidad o seguridad usa continue-on-error: si falla, bloquea.
+#
+# Secrets (Settings > Secrets and variables > Actions):
+#   SONAR_TOKEN  (obligatorio)  token de SonarQube Cloud
+#   SNYK_TOKEN   (opcional)     si existe, Snyk también bloquea por CVE altas
+#   GITHUB_TOKEN (automático)   publica la imagen en GitHub Container Registry
+# =============================================================================
+name: CI/CD Catálogo
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "release/**", "hotfix/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "21"
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ===========================================================================
+  # 1. PRUEBAS (IE2): unitarias JUnit + BDD Cucumber + cobertura JaCoCo 100%
+  # ===========================================================================
+  pruebas:
+    name: Pruebas (JUnit + Cucumber + JaCoCo)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      # `verify` corre las pruebas y luego `jacoco:check`: si una prueba falla
+      # o la cobertura de líneas baja del 100%, el job falla y el pipeline se
+      # detiene (política de calidad del proyecto).
+      - name: Ejecutar pruebas y verificar cobertura
+        run: mvn -B verify
+
+      - name: Resumen de cobertura
+        if: always()
+        run: |
+          CSV=target/site/jacoco/jacoco.csv
+          if [ -f "$CSV" ]; then
+            awk -F, 'NR>1 {m+=$8; c+=$9} END {printf "### Cobertura de líneas (JaCoCo): %.1f%%\n", (c*100)/(m+c)}' "$CSV" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          TESTS=$(grep -ho 'tests="[0-9]*"' target/surefire-reports/TEST-*.xml 2>/dev/null | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
+          echo "- Pruebas ejecutadas: **${TESTS}**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir reportes de pruebas y cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-pruebas
+          path: |
+            target/surefire-reports/
+            target/site/jacoco/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ===========================================================================
+  # 2. SONARQUBE CLOUD (IE3): análisis estático + Quality Gate que BLOQUEA
+  # ===========================================================================
+  sonarcloud:
+    name: SonarQube Cloud (Quality Gate)
+    needs: pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (historial completo para Sonar)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      # sonar.qualitygate.wait=true hace que el paso espere el resultado del
+      # Quality Gate y falle si es "Failed" -> el deploy no se ejecuta.
+      - name: Análisis SonarQube Cloud
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::Falta el secret SONAR_TOKEN. Sin análisis de calidad no se permite desplegar."
+            exit 1
+          fi
+          mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.qualitygate.wait=true \
+            -Dsonar.qualitygate.timeout=300
+
+  # ===========================================================================
+  # 3. SNYK (IE3): vulnerabilidades en dependencias (bloquea si hay HIGH+)
+  # ===========================================================================
+  snyk:
+    name: Snyk (dependencias)
+    needs: pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Analizar dependencias con Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "::warning::SNYK_TOKEN no configurado: se omite Snyk (Dependabot, SonarQube y Trivy siguen activos)."
+            exit 0
+          fi
+          npm install -g snyk@latest
+          snyk test --file=pom.xml --severity-threshold=high
+
+  # ===========================================================================
+  # 4. IMAGEN (IE1 + IE3): build Docker, escaneo Trivy que BLOQUEA, push GHCR
+  # ===========================================================================
+  imagen:
+    name: Imagen Docker (build + Trivy + GHCR)
+    needs: pruebas
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Trazabilidad (IE4): la imagen se etiqueta con el SHA del commit y con
+      # la versión del pom + número de ejecución.
+      - name: Calcular etiquetas de la imagen
+        id: meta
+        run: |
+          POM_VERSION=$(grep -m1 -oP '(?<=<version>)[^<]+(?=</version>)' <(sed -n '/<artifactId>catalogo-svc<\/artifactId>/,$p' pom.xml))
+          echo "tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${POM_VERSION}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tamaño de la imagen
+        run: |
+          docker image ls "${{ steps.meta.outputs.image }}" --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Gate de seguridad: si la imagen tiene CVE CRITICAL o HIGH con parche
+      # disponible, el job falla y la imagen NO se publica ni se despliega.
+      - name: Escanear imagen con Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Guardar imagen para los jobs siguientes
+        run: docker save "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}" | gzip > imagen.tar.gz
+
+      - name: Subir imagen como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagen-docker
+          path: imagen.tar.gz
+          retention-days: 3
+
+      # Solo en push (no en PR) se publica en el registro de contenedores.
+      - name: Login a GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicar imagen en GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}"
+          echo "### Imagen publicada" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # 5. ORQUESTACIÓN KUBERNETES (IE5): despliegue en cluster kind dentro del
+  #    runner, con réplicas, probes, límites de recursos y autorreparación.
+  # ===========================================================================
+  orquestacion-k8s:
+    name: Orquestación Kubernetes (kind)
+    needs: imagen
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_REF: caso09-catalogo:${{ needs.imagen.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Descargar imagen
+        uses: actions/download-artifact@v4
+        with:
+          name: imagen-docker
+
+      - name: Cargar imagen en Docker
+        run: |
+          LOADED=$(gunzip -c imagen.tar.gz | docker load | sed -n 's/^Loaded image: //p')
+          docker tag "$LOADED" "$IMAGE_REF"
+
+      - name: Crear cluster Kubernetes (kind)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: catalogo
+
+      - name: Cargar imagen en el cluster
+        run: kind load docker-image "$IMAGE_REF" --name catalogo
+
+      - name: Aplicar manifiestos
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          sed "s|IMAGE_PLACEHOLDER|${IMAGE_REF}|" k8s/deployment.yaml | kubectl apply -f -
+          kubectl apply -f k8s/service.yaml -f k8s/hpa.yaml
+          kubectl -n catalogo rollout status deployment/catalogo-svc --timeout=240s
+
+      - name: Verificar réplicas y servicio
+        run: |
+          kubectl -n catalogo get deploy,pods,svc,hpa -o wide
+          READY=$(kubectl -n catalogo get deploy catalogo-svc -o jsonpath='{.status.readyReplicas}')
+          echo "Réplicas listas: $READY"
+          [ "$READY" -ge 2 ] || { echo "::error::Se esperaban al menos 2 réplicas listas"; exit 1; }
+          kubectl -n catalogo port-forward svc/catalogo-svc 9090:80 >/dev/null 2>&1 &
+          sleep 5
+          curl -fsS http://localhost:9090/actuator/health
+          echo
+          curl -fsS http://localhost:9090/api/productos
+
+      # Autorreparación: se elimina un pod y Kubernetes debe recrearlo solo.
+      - name: Prueba de autorreparación
+        run: |
+          POD=$(kubectl -n catalogo get pods -l app=catalogo-svc -o jsonpath='{.items[0].metadata.name}')
+          echo "Eliminando pod $POD"
+          kubectl -n catalogo delete pod "$POD" --wait=false
+          sleep 5
+          kubectl -n catalogo rollout status deployment/catalogo-svc --timeout=180s
+          kubectl -n catalogo wait --for=condition=Ready pods -l app=catalogo-svc --timeout=180s
+          kubectl -n catalogo get pods -o wide
+          echo "### Kubernetes: 2 réplicas sanas y pod recreado automáticamente" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnóstico (si falla)
+        if: failure()
+        run: |
+          kubectl -n catalogo describe pods || true
+          kubectl -n catalogo logs -l app=catalogo-svc --tail=100 || true
+
+  # ===========================================================================
+  # 6. DEPLOY AUTOMÁTICO (IE4): entorno cloud simulado con Docker Compose
+  #    develop -> entorno "desarrollo"   |   main -> entorno "produccion"
+  # ===========================================================================
+  deploy:
+    name: Deploy (${{ github.ref_name == 'main' && 'produccion' || 'desarrollo' }})
+    needs: [pruebas, sonarcloud, snyk, imagen, orquestacion-k8s]
+    if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name == 'main' && 'produccion' || 'desarrollo' }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      TAG: ${{ needs.imagen.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login a GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Se despliega la MISMA imagen que pasó pruebas y escaneos (por SHA).
+      - name: Descargar imagen del registro
+        run: |
+          IMAGE="${IMAGE_NAME,,}:${TAG}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          docker pull "$IMAGE"
+
+      - name: Desplegar con Docker Compose (2 réplicas + balanceador)
+        run: |
+          docker compose up -d --no-build --wait --wait-timeout 180
+          docker compose ps
+
+      - name: Pruebas de humo post-deploy
+        run: |
+          set -euo pipefail
+          BASE=http://localhost:8080
+          curl -fsS "$BASE/actuator/health" | grep -q '"status":"UP"'
+          echo "Health vía balanceador: UP"
+          curl -fsS -o /dev/null -w "GET /api/productos vía balanceador: HTTP %{http_code}\n" "$BASE/api/productos"
+          # Cada réplica tiene su propia H2 en memoria, por eso el CRUD
+          # completo se prueba dentro de una misma réplica.
+          docker compose exec -T --index 1 catalogo-svc sh -c '
+            curl -fsS -X POST http://localhost:8080/api/productos -H "Content-Type: application/json" \
+              -d "{\"nombre\":\"Caja sorpresa\",\"marca\":\"SubBox\",\"precio\":9990}" &&
+            curl -fsS http://localhost:8080/api/productos | grep -q "Caja sorpresa"'
+          echo "CRUD en réplica 1: OK"
+
+      # Trazabilidad: el commit desplegado debe ser exactamente este commit.
+      - name: Verificar trazabilidad commit -> imagen -> contenedor
+        run: |
+          set -euo pipefail
+          for C in $(docker compose ps -q catalogo-svc); do
+            REV=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$C")
+            echo "Contenedor $C -> commit $REV"
+            [ "$REV" = "$GITHUB_SHA" ] || { echo "::error::El contenedor no corresponde al commit $GITHUB_SHA"; exit 1; }
+          done
+          COMMIT=$(curl -fsS http://localhost:8080/actuator/info | grep -o "$GITHUB_SHA" | head -1)
+          [ "$COMMIT" = "$GITHUB_SHA" ] || { echo "::error::/actuator/info no reporta el commit esperado"; exit 1; }
+
+      - name: Prueba de escalabilidad (2 -> 3 réplicas)
+        run: |
+          docker compose up -d --no-build --wait --scale catalogo-svc=3
+          N=$(docker compose ps -q catalogo-svc | wc -l)
+          echo "Réplicas activas: $N"
+          [ "$N" -eq 3 ]
+          for i in $(seq 1 9); do curl -fsS -o /dev/null http://localhost:8080/api/productos; done
+          echo "Balanceador respondió 9/9 peticiones con 3 réplicas"
+
+      - name: Resumen del despliegue
+        if: always()
+        run: |
+          {
+            echo "## Despliegue — entorno \`${{ github.ref_name == 'main' && 'produccion' || 'desarrollo' }}\`"
+            echo "| Dato | Valor |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Rama | \`${GITHUB_REF_NAME}\` |"
+            echo "| Autor del cambio | ${GITHUB_ACTOR} |"
+            echo "| Imagen | \`${IMAGE}\` |"
+            echo "| Versión | \`${{ needs.imagen.outputs.version }}\` |"
+            echo "| Ejecución | [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |"
+            echo ""
+            echo '```'
+            docker compose ps
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar logs del despliegue
+        if: always()
+        run: |
+          mkdir -p deploy-logs
+          docker compose ps > deploy-logs/compose-ps.txt
+          docker compose logs --no-color > deploy-logs/compose-logs.txt
+          echo "$GITHUB_SHA $IMAGE $(date -u +%FT%TZ)" > deploy-logs/deploy-info.txt
+
+      - name: Subir logs del despliegue
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-logs-${{ github.ref_name }}-${{ github.run_number }}
+          path: deploy-logs/
+          retention-days: 30
+
+      - name: Apagar entorno simulado
+        if: always()
+        run: docker compose down -v
