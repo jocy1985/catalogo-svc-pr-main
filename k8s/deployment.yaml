@@ -1,0 +1,67 @@
+# Deployment de catalogo-svc   [IE5 / IE3 escalabilidad]
+# El pipeline reemplaza IMAGE_PLACEHOLDER por la imagen del commit (sha-<commit>).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalogo-svc
+  namespace: catalogo
+  labels:
+    app: catalogo-svc
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0   # nunca baja de 2 réplicas sanas durante un deploy
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: catalogo-svc
+  template:
+    metadata:
+      labels:
+        app: catalogo-svc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: catalogo-svc
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 15
+            failureThreshold: 3

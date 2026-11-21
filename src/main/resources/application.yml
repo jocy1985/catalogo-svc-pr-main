@@ -9,7 +9,7 @@ spring:
   jpa:
     hibernate:
       ddl-auto: create-drop
-    show-sql: true
+    show-sql: false
     open-in-view: false
   h2:
     console:
@@ -24,3 +24,23 @@ springdoc:
     path: /v3/api-docs
   swagger-ui:
     path: /swagger-ui.html
+
+# Actuator: health para los healthchecks de Docker/Kubernetes (IE1, IE5)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: catalogo-svc
+    version: ${APP_VERSION:local}
+    commit: ${GIT_COMMIT:local}
