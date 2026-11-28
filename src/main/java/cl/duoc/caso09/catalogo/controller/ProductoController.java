@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import cl.duoc.caso09.catalogo.dto.ProductoRequest;
 import cl.duoc.caso09.catalogo.model.Producto;
 import cl.duoc.caso09.catalogo.service.ProductoService;
 
@@ -37,14 +38,14 @@ public class ProductoController {
     }
 
     @PostMapping
-    public ResponseEntity<Producto> crear(@Valid @RequestBody Producto recurso) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(service.create(recurso));
+    public ResponseEntity<Producto> crear(@Valid @RequestBody ProductoRequest recurso) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.create(recurso.toEntity()));
     }
 
     @PutMapping("/{id}")
     public ResponseEntity<Producto> actualizar(@PathVariable Long id,
-            @Valid @RequestBody Producto datos) {
-        return service.update(id, datos).map(ResponseEntity::ok)
+            @Valid @RequestBody ProductoRequest datos) {
+        return service.update(id, datos.toEntity()).map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
 
