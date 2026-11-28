@@ -1,0 +1,18 @@
+# ServiceMonitor: Prometheus raspa /actuator/prometheus de cada replica   [EP3 IE1]
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: catalogo-svc
+  namespace: catalogo
+  labels:
+    app: catalogo-svc
+spec:
+  selector:
+    matchLabels:
+      app: catalogo-svc
+  namespaceSelector:
+    matchNames: [catalogo]
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 10s

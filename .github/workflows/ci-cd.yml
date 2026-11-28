@@ -3,9 +3,12 @@
 #
 #   pruebas ─┬─► sonarcloud ─┐
 #            ├─► snyk ───────┤
-#            └─► imagen ─────┼─► orquestacion-k8s ─► deploy (entorno simulado)
-#               (build+Trivy │
-#                +push GHCR) ┘
+#            └─► imagen ─────┼─► orquestacion-k8s ─┐
+#               (build+Trivy │                     ├─► deploy (entorno simulado)
+#                +push GHCR) └─► observabilidad ───┤
+#   cumplimiento (Gitleaks + Trivy config + auditoria) ┘
+#
+# EP3: observabilidad (Prometheus, Alertmanager, Grafana) y cumplimiento.
 #
 # Regla: el deploy SOLO corre si TODOS los jobs anteriores terminan en verde.
 # Ningún gate de calidad o seguridad usa continue-on-error: si falla, bloquea.
@@ -304,12 +307,164 @@ jobs:
           kubectl -n catalogo logs -l app=catalogo-svc --tail=100 || true
 
   # ===========================================================================
-  # 6. DEPLOY AUTOMÁTICO (IE4): entorno cloud simulado con Docker Compose
+  # 6. CUMPLIMIENTO (EP3 IE5 + IE6): secretos, configuracion insegura y
+  #    politicas del repositorio. Cualquier hallazgo CRITICO detiene el deploy.
+  # ===========================================================================
+  cumplimiento:
+    name: Cumplimiento (Gitleaks + Trivy config + auditoria)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Gitleaks busca tokens, claves y contrasenas en los archivos del repo.
+      - name: Buscar secretos con Gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.21.2 \
+            dir /repo --redact --verbose --exit-code 1
+
+      # Revisa Dockerfile y manifiestos de Kubernetes: bloquea si hay CRITICAL.
+      - name: Revisar configuracion con Trivy (bloquea CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: CRITICAL
+          exit-code: "1"
+          format: table
+
+      - name: Reporte de configuracion HIGH y MEDIUM (informativo)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,MEDIUM
+          exit-code: "0"
+          format: table
+
+      - name: Auditoria de politicas del repositorio
+        run: bash scripts/auditoria.sh auditoria-reporte.md
+
+      - name: Publicar reporte de auditoria
+        if: always()
+        run: |
+          if [ -f auditoria-reporte.md ]; then cat auditoria-reporte.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Subir reporte de auditoria
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: auditoria-cumplimiento
+          path: auditoria-reporte.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ===========================================================================
+  # 7. OBSERVABILIDAD (EP3 IE1, IE2, IE3, IE6): Kubernetes con Prometheus,
+  #    Alertmanager y Grafana instalados automaticamente. Publica metricas del
+  #    pipeline, verifica disponibilidad y errores, y guarda el dashboard.
+  # ===========================================================================
+  observabilidad:
+    name: Observabilidad (Prometheus + Grafana + alertas)
+    needs: [pruebas, imagen]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      IMAGE_REF: caso09-catalogo:${{ needs.imagen.outputs.tag }}
+      KPS_VERSION: "66.3.0"
+      PGW_VERSION: "2.15.0"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Descargar imagen
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: imagen-docker
+
+      - name: Descargar reportes de pruebas (cobertura)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: reportes-pruebas
+          path: reportes
+
+      - name: Cargar imagen en Docker
+        run: |
+          LOADED=$(gunzip -c imagen.tar.gz | docker load | sed -n 's/^Loaded image: //p')
+          docker tag "$LOADED" "$IMAGE_REF"
+
+      - name: Crear cluster Kubernetes (kind)
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
+        with:
+          cluster_name: observabilidad
+
+      - name: Cargar imagen en el cluster
+        run: kind load docker-image "$IMAGE_REF" --name observabilidad
+
+      - name: Instalar Prometheus, Alertmanager y Grafana (kube-prometheus-stack)
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          instalar() {  # $1=release $2=chart $3=version, resto=argumentos
+            local rel=$1 chart=$2 ver=$3; shift 3
+            if ! helm upgrade --install "$rel" "$chart" --version "$ver" -n monitoreo --create-namespace "$@"; then
+              echo "::warning::$chart $ver no disponible; se instala la ultima version publicada"
+              helm upgrade --install "$rel" "$chart" -n monitoreo --create-namespace "$@"
+            fi
+          }
+          instalar kps prometheus-community/kube-prometheus-stack "$KPS_VERSION" \
+            -f k8s/monitoreo/values-kube-prometheus-stack.yaml --wait --timeout 10m
+          instalar pushgateway prometheus-community/prometheus-pushgateway "$PGW_VERSION" \
+            --set serviceMonitor.enabled=true --set serviceMonitor.honorLabels=true --wait --timeout 5m
+          for i in $(seq 1 60); do
+            kubectl -n monitoreo get pod -l app.kubernetes.io/name=prometheus -o name | grep -q pod && break
+            sleep 5
+          done
+          kubectl -n monitoreo wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus --timeout=300s
+          kubectl -n monitoreo get pods
+
+      - name: Desplegar microservicio con monitoreo
+        run: |
+          INICIO=$(date +%s)
+          kubectl apply -f k8s/namespace.yaml
+          sed "s|IMAGE_PLACEHOLDER|${IMAGE_REF}|" k8s/deployment.yaml | kubectl apply -f -
+          kubectl apply -f k8s/service.yaml -f k8s/hpa.yaml
+          kubectl -n catalogo rollout status deployment/catalogo-svc --timeout=240s
+          echo "DEPLOY_SEG=$(( $(date +%s) - INICIO ))" >> "$GITHUB_ENV"
+          kubectl apply -f k8s/monitoreo/servicemonitor.yaml -f k8s/monitoreo/prometheusrule.yaml
+          kubectl -n monitoreo create configmap dashboard-catalogo \
+            --from-file=dashboard-catalogo.json=k8s/monitoreo/dashboard-catalogo.json --dry-run=client -o yaml \
+            | kubectl label --local -f - grafana_dashboard=1 -o yaml | kubectl apply -f -
+
+      - name: Verificar metricas, alertas y dashboard (gates)
+        run: bash scripts/verificar-observabilidad.sh
+
+      - name: Diagnostico (si falla)
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl -n catalogo describe pods || true
+          kubectl -n catalogo logs -l app=catalogo-svc --tail=100 || true
+
+      - name: Subir evidencias de observabilidad
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: evidencias-observabilidad
+          path: evidencias/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ===========================================================================
+  # 8. DEPLOY AUTOMÁTICO (IE4): entorno cloud simulado con Docker Compose
   #    develop -> entorno "desarrollo"   |   main -> entorno "produccion"
   # ===========================================================================
   deploy:
     name: Deploy (${{ github.ref_name == 'main' && 'produccion' || 'desarrollo' }})
-    needs: [pruebas, sonarcloud, snyk, imagen, orquestacion-k8s]
+    needs: [pruebas, sonarcloud, snyk, imagen, orquestacion-k8s, cumplimiento, observabilidad]
     if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'develop')
     runs-on: ubuntu-latest
     environment:

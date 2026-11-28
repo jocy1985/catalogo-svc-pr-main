@@ -282,6 +282,9 @@ Se utilizó **Claude Opus 5.5 (Anthropic, https://claude.ai)** como apoyo para:
 | Redacción de archivos de configuración | `Dockerfile`, `.dockerignore`, `.github/workflows/ci-cd.yml`, `.github/dependabot.yml`, `docker-compose.yml`, `deploy/nginx/nginx.conf`, `k8s/` |
 | Redacción de la documentación descriptiva | secciones EP2 de este README |
 | Redacción asistida de la justificación técnica | sección "Justificación técnica de las decisiones" (marcada abajo) |
+| EP3: archivos de observabilidad y cumplimiento | jobs `cumplimiento` y `observabilidad` de `ci-cd.yml`, `k8s/monitoreo/`, `scripts/` |
+| EP3: documentación técnica | `docs/06_Observabilidad.md`, `docs/07_Cumplimiento.md`, sección EP3 y "Resultado de la primera ejecución" de este README |
+| Diagnóstico de errores del pipeline | interpretación de logs de SonarCloud y Trivy, y comandos de corrección |
 
 Todo el contenido generado fue revisado, probado en el pipeline y validado por la autora.
 La reflexión individual fue redactada sin IA. Referencia: Duoc UC, guía de uso de IA,
@@ -331,6 +334,69 @@ vez de ignorarlas.
 **2 réplicas con balanceador.** Con una sola réplica, cualquier caída o redespliegue deja el
 servicio sin respuesta. Con dos, nginx sigue atendiendo con la réplica sana y reintenta en ella
 si la otra falla.
+
+---
+
+# EP3 — Observabilidad y entornos reales
+
+> Trabajo **individual**. Detalle técnico en [docs/06_Observabilidad.md](docs/06_Observabilidad.md)
+> y [docs/07_Cumplimiento.md](docs/07_Cumplimiento.md).
+
+Se agregaron dos jobs al mismo pipeline. El `deploy` ahora depende también de ellos:
+
+```mermaid
+flowchart LR
+    P[pruebas] --> S[sonarcloud]
+    P --> K[snyk]
+    P --> I[imagen + Trivy]
+    I --> O[orquestacion-k8s]
+    I --> OB[observabilidad<br/>Prometheus + Alertmanager<br/>+ Grafana + gates]
+    C[cumplimiento<br/>Gitleaks + Trivy config<br/>+ auditoría] --> D
+    S --> D[deploy]
+    K --> D
+    O --> D
+    OB --> D
+```
+
+| IE | Qué se hizo | Dónde |
+|---|---|---|
+| IE1 | Prometheus mide logs (líneas ERROR), uso (peticiones, CPU, memoria), errores (4xx/5xx) y disponibilidad (`up`). 7 reglas de alerta en Alertmanager | `k8s/monitoreo/`, job `observabilidad` |
+| IE2 | Kubernetes con **kube-prometheus-stack** instalado automáticamente con Helm en cada ejecución; ServiceMonitor, reglas y dashboard sin pasos manuales | job `observabilidad`, `k8s/monitoreo/values-kube-prometheus-stack.yaml` |
+| IE3 | Dashboard de Grafana con 14 paneles: tiempo de despliegue, cobertura, duración del pipeline, pruebas, CPU, memoria, errores, latencia y disponibilidad. Las métricas del pipeline se publican en un Pushgateway | `k8s/monitoreo/dashboard-catalogo.json`, `scripts/verificar-observabilidad.sh` |
+| IE4 | Tabla "métrica → umbral → decisión" y un ejemplo real de decisión basada en datos | [docs/06_Observabilidad.md](docs/06_Observabilidad.md#4-cómo-las-métricas-guían-las-decisiones-ie4) |
+| IE5 | SonarQube Quality Gate, Gitleaks, Trivy config, auditoría automática, acciones fijadas por SHA, excepciones con vencimiento y protección de ramas | `scripts/auditoria.sh`, `scripts/proteger-ramas.ps1`, job `cumplimiento` |
+| IE6 | El deploy depende de todos los gates; la observabilidad bloquea si hay menos de 2 réplicas, 5xx ≥ 5 % o alertas críticas. Evidencia de 5 detenciones reales | [docs/07_Cumplimiento.md](docs/07_Cumplimiento.md#2-el-pipeline-se-detiene-ante-fallas-críticas-ie6) |
+
+**Evidencias en cada ejecución** (*Actions → run → Summary / Artifacts*): tabla de métricas,
+gates de observabilidad, reporte de auditoría, `evidencias-observabilidad` (captura del
+dashboard de Grafana, reglas de alerta, targets y logs) y `auditoria-cumplimiento`.
+
+**Limitación declarada:** el cluster corre en los runners de GitHub (kind), no en AWS EKS. Por
+tiempo no se alcanzó a migrar a AWS Academy; los manifiestos y valores de Helm son los mismos que
+se usarían en EKS (plan en `docs/06_Observabilidad.md`, sección 2).
+
+## Resultado de la primera ejecución
+
+> Registro técnico de lo ocurrido, redactado con apoyo de IA a partir de los logs reales de
+> GitHub Actions.
+
+La primera ejecución completa del pipeline **falló**, y eso era lo esperado de un pipeline con
+gates que bloquean:
+
+1. **Trivy** detuvo el job `imagen` por 13 vulnerabilidades HIGH/CRITICAL en Tomcat y Jackson
+   (dependencias de Spring Boot). Se actualizaron en el `pom.xml`. Dos CVE de Spring Framework 6.2
+   no tienen parche en esa versión y quedaron en `.trivyignore` como riesgo aceptado, con fecha de
+   vencimiento (31-12-2026) y un plan (migrar a Spring Boot 4).
+2. La versión de Tomcat elegida no existía en Maven Central, así que el build falló. Se cambió a 10.1.62.
+3. **SonarCloud** respondía *Not authorized*. La causa fue que el secret `SONAR_TOKEN` se había
+   guardado con un texto que no era el token. Se generó un token nuevo, se comprobó su largo (40
+   caracteres) y su acceso a la organización con la API de SonarCloud, y después se guardó.
+4. Con el token correcto, el **Quality Gate falló** por seguridad (nota C): GitHub Actions sin SHA
+   fijo, `npm install snyk@latest` y un `curl` sin forzar HTTPS. Se corrigieron los tres puntos.
+5. Con eso el pipeline quedó en verde y se promovió por GitFlow: PR #1 (`feature/ep2-pipeline` → `develop`,
+   deploy a *desarrollo*) y PR #2 (`develop` → `main`, deploy a *produccion*).
+
+Detalle con enlaces a cada ejecución en [docs/07_Cumplimiento.md](docs/07_Cumplimiento.md).
 
 ## Conclusiones y reflexión individual
 

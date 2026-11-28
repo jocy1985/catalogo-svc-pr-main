@@ -1,0 +1,46 @@
+# Valores de kube-prometheus-stack para el cluster de observabilidad   [EP3 IE1, IE2, IE3]
+# Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics.
+# Se instala automaticamente en cada ejecucion del pipeline (job "observabilidad").
+
+# Componentes del plano de control que kind no expone: se desactivan para que
+# no aparezcan como targets caidos ni disparen alertas falsas.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 10s
+    evaluationInterval: 10s
+    retention: 2h
+    # Descubrir TODOS los ServiceMonitor y PrometheusRule del cluster
+    # (no solo los que crea el chart).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 200m
+        memory: 400Mi
+
+alertmanager:
+  enabled: true
+
+grafana:
+  enabled: true
+  adminPassword: admin-ep3   # cluster efimero dentro del runner; se destruye al terminar
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
