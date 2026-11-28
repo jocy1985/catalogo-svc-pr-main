@@ -1,0 +1,16 @@
+# Solo pom.xml y src/ entran a la imagen; todo lo demás queda fuera del contexto.
+.git/
+.github/
+target/
+docs/
+k8s/
+deploy/
+*.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+.idea/
+.vscode/
+*.iml
+.env
+*.env
