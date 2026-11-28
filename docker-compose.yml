@@ -1,8 +1,62 @@
+# =============================================================================
+# Orquestación con Docker Compose — entorno cloud simulado   [IE4 / IE5]
+#
+#   cliente ──► lb (nginx :8080) ──► catalogo-svc (2 réplicas, :8080 interno)
+#
+# - Local:     docker compose up -d --build
+# - Pipeline:  IMAGE=ghcr.io/<repo>:sha-<commit> docker compose up -d --no-build
+#              (despliega exactamente la imagen que pasó tests y escaneo)
+# =============================================================================
 services:
   catalogo-svc:
     build: .
-    image: duoc/caso09-catalogo:1.0.0
-    container_name: caso09-catalogo-svc
-    ports:
-      - "${PORT:-8080}:8080"
+    image: ${IMAGE:-caso09-catalogo:local}
+    # Sin container_name ni ports para poder tener varias réplicas: solo el
+    # balanceador se publica hacia afuera.
+    expose:
+      - "8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-default}
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
+    networks: [catalogo-net]
+
+  lb:
+    image: nginx:1.27-alpine
+    ports:
+      - "${PORT:-8080}:80"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      catalogo-svc:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    networks: [catalogo-net]
+
+networks:
+  catalogo-net:
+    driver: bridge

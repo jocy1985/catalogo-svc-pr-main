@@ -1,0 +1,5 @@
+# Excepciones de seguridad (gobernanza). Cada una con motivo y vencimiento.
+# spring-webmvc 6.2.x: la correccion solo existe en Spring Framework 7 (Spring Boot 4).
+# Riesgo aceptado temporalmente; plan: migrar a Spring Boot 4 en la EP3.
+CVE-2026-47884 exp:2026-12-31
+CVE-2026-47890 exp:2026-12-31

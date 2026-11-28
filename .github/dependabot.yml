@@ -1,0 +1,36 @@
+# Dependabot — escaneo semanal de dependencias   [IE3]
+# Abre PRs automáticos contra develop cuando hay versiones nuevas o
+# vulnerabilidades conocidas. Cada PR pasa por el pipeline completo antes de
+# poder fusionarse.
+version: 2
+updates:
+  - package-ecosystem: "maven"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      timezone: "America/Santiago"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      timezone: "America/Santiago"
+    commit-message:
+      prefix: "build(docker)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      timezone: "America/Santiago"
+    commit-message:
+      prefix: "ci(deps)"
