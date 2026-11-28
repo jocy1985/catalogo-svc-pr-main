@@ -202,7 +202,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
-
+          trivyignores: .trivyignore
       - name: Guardar imagen para los jobs siguientes
         run: docker save "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}" | gzip > imagen.tar.gz
 
