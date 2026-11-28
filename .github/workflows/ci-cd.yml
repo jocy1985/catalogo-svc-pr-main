@@ -418,7 +418,7 @@ jobs:
           instalar kps prometheus-community/kube-prometheus-stack "$KPS_VERSION" \
             -f k8s/monitoreo/values-kube-prometheus-stack.yaml --wait --timeout 10m
           instalar pushgateway prometheus-community/prometheus-pushgateway "$PGW_VERSION" \
-            --set serviceMonitor.enabled=true --set serviceMonitor.honorLabels=true --wait --timeout 5m
+            --set serviceMonitor.enabled=true --set serviceMonitor.honorLabels=true --set serviceMonitor.namespace=monitoreo --wait --timeout 5m
           for i in $(seq 1 60); do
             kubectl -n monitoreo get pod -l app.kubernetes.io/name=prometheus -o name | grep -q pod && break
             sleep 5
