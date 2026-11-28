@@ -140,8 +140,8 @@ jobs:
             echo "::warning::SNYK_TOKEN no configurado: se omite Snyk (Dependabot, SonarQube y Trivy siguen activos)."
             exit 0
           fi
-          curl -fsSL -o snyk-linux https://static.snyk.io/cli/v1.1309.0/snyk-linux
-          curl -fsSL -o snyk-linux.sha256 https://static.snyk.io/cli/v1.1309.0/snyk-linux.sha256
+          curl --proto '=https' --tlsv1.2 -fsSL -o snyk-linux https://static.snyk.io/cli/v1.1309.0/snyk-linux
+          curl --proto '=https' --tlsv1.2 -fsSL -o snyk-linux.sha256 https://static.snyk.io/cli/v1.1309.0/snyk-linux.sha256
           sha256sum -c snyk-linux.sha256
           chmod +x snyk-linux
           ./snyk-linux test --file=pom.xml --severity-threshold=high
