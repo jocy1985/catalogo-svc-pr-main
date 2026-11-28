@@ -21,7 +21,7 @@ RUN mvn -B -q package -DskipTests \
  && cp target/catalogo-svc-*.jar /app/app.jar
 
 # ── Etapa 2: runtime ─────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:25-jre-alpine
 
 # Metadatos OCI: permiten saber desde qué commit se construyó la imagen
 # (trazabilidad, IE4). El pipeline les pasa los valores reales.
